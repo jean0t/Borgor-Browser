@@ -7,13 +7,15 @@ from PyQt5.QtWidgets import (
     QLabel, QHBoxLayout, QTabBar, QMenu)
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineProfile
 from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
-from PyQt5.QtCore import QUrl, Qt, pyqtSignal, QObject
+from PyQt5.QtCore import QUrl, Qt, pyqtSignal, QObject, QEventLoop, QTimer
 from PyQt5.QtGui import QKeySequence
 
 
 # Adding the all mighty adblocker
 from adblockparser import AdblockRules
+from functools import lru_cache
 from pathlib import Path
+from os import cpu_count
 
 
 # Signal to update the bookmark menu from a background thread
@@ -344,18 +346,41 @@ class Browser(QMainWindow):
 
 
 # Adblock section
-
 class AdBlockIntercept(QWebEngineUrlRequestInterceptor):
     def __init__(self, rules, parent=None):
         super().__init__(parent)
         self.rules = rules
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=cpu_count())  # it counts all threads avaiable
+
+    @lru_cache(maxsize=2048)
+    def should_block_url(self, url):
+        return self.rules.should_block(url)
 
     def interceptRequest(self, info):
         url = info.requestUrl().toString()
-        if self.rules.should_block(url):
-            info.block(True)
+        
+        # Use ThreadPoolExecutor to check the URL in a separate thread
+        future = self.executor.submit(self.rules.should_block, url)
+
+        # create an event loop for the thread
+        # but it wont be blocked for too long
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+
+        timer.start(1)  # 1 ms of timeout
+        future.add_done_callback(lambda _: loop.quit())
+
+        loop.exec_()  # Run event loop until response or timeout
+
+        if future.done():
+            result = future.result()
         else:
-            info.block(False)
+            result = self.should_block_url(url)  # Use cached fallback
+
+        info.block(result)
+
 
 def load_filter_rules(filter_file_path):
     filter_file_path = filter_file_path.resolve()

@@ -12,11 +12,15 @@ from PyQt5.QtGui import QKeySequence
 
 
 # Adding the all mighty adblocker
-from adblockparser import AdblockRules
-from functools import lru_cache
-from pathlib import Path
-from os import cpu_count
-
+HAS_ADBLOCK=False
+try:
+    from adblockparser import AdblockRules
+    from functools import lru_cache, cache
+    from pathlib import Path
+    from os import cpu_count
+    HAS_ADBLOCK=True
+except ImportError:
+    pass
 
 # Signal to update the bookmark menu from a background thread
 class UpdateBookmarkMenuSignal(QObject):
@@ -346,65 +350,67 @@ class Browser(QMainWindow):
 
 
 # Adblock section
-class AdBlockIntercept(QWebEngineUrlRequestInterceptor):
-    def __init__(self, rules, parent=None):
-        super().__init__(parent)
-        self.rules = rules
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=cpu_count())  # it counts all threads avaiable
+if HAS_ADBLOCK:
+    class AdBlockIntercept(QWebEngineUrlRequestInterceptor):
+        def __init__(self, rules, parent=None):
+            super().__init__(parent)
+            self.rules = rules
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=cpu_count())  # it counts all threads avaiable
 
-    @lru_cache(maxsize=2048)
-    def should_block_url(self, url):
-        return self.rules.should_block(url)
+        @cache
+        def should_block_url(self, url):
+            return self.rules.should_block(url)
 
-    def interceptRequest(self, info):
-        url = info.requestUrl().toString()
+        def interceptRequest(self, info):
+            url = info.requestUrl().toString()
+            
+            # Use ThreadPoolExecutor to check the URL in a separate thread
+            future = self.executor.submit(self.rules.should_block, url)
+
+            # create an event loop for the thread
+            # but it wont be blocked for too long
+            loop = QEventLoop()
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(loop.quit)
+
+            timer.start(1)  # 1 ms of timeout
+            future.add_done_callback(lambda _: loop.quit())
+
+            loop.exec_()  # Run event loop until response or timeout
+
+            if future.done():
+                result = future.result()
+            else:
+                result = self.should_block_url(url)  # Use cached fallback
+
+            info.block(result)
+
+
+    def load_filter_rules(filter_file_path):
+        filter_file_path = filter_file_path.resolve()
+        if not filter_file_path.exists():
+            raise FileNotFoundError("Filter file not found")
         
-        # Use ThreadPoolExecutor to check the URL in a separate thread
-        future = self.executor.submit(self.rules.should_block, url)
+        with open(filter_file_path, "r", encoding="utf-8") as f:
+            filters = [line.strip() for line in f if line.strip() and not line.startswith("!")]
 
-        # create an event loop for the thread
-        # but it wont be blocked for too long
-        loop = QEventLoop()
-        timer = QTimer()
-        timer.setSingleShot(True)
-        timer.timeout.connect(loop.quit)
-
-        timer.start(1)  # 1 ms of timeout
-        future.add_done_callback(lambda _: loop.quit())
-
-        loop.exec_()  # Run event loop until response or timeout
-
-        if future.done():
-            result = future.result()
-        else:
-            result = self.should_block_url(url)  # Use cached fallback
-
-        info.block(result)
-
-
-def load_filter_rules(filter_file_path):
-    filter_file_path = filter_file_path.resolve()
-    if not filter_file_path.exists():
-        raise FileNotFoundError("Filter file not found")
-    
-    with open(filter_file_path, "r", encoding="utf-8") as f:
-        filters = [line.strip() for line in f if line.strip() and not line.startswith("!")]
-
-    return AdblockRules(filters)
+        return AdblockRules(filters)
 
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    # filter list path
-    base_path = Path(__file__).parent
-    filter_path = base_path / "easylist.txt"
-    rules = load_filter_rules(filter_path)
+    if HAS_ADBLOCK:
+        # filter list path
+        base_path = Path(__file__).parent
+        filter_path = base_path / "easylist.txt"
+        rules = load_filter_rules(filter_path)
 
-    interceptor = AdBlockIntercept(rules)
-    profile = QWebEngineProfile.defaultProfile()
-    profile.setUrlRequestInterceptor(interceptor)
+        interceptor = AdBlockIntercept(rules)
+        profile = QWebEngineProfile.defaultProfile()
+        profile.setUrlRequestInterceptor(interceptor)
 
     app.setStyle(QStyleFactory.create('Fusion'))  # Ensure consistent look
     browser = Browser()

@@ -4,11 +4,16 @@ import concurrent.futures
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QVBoxLayout, QWidget, QLineEdit, QAction, 
     QToolBar, QFileDialog, QMessageBox, QPushButton, QProgressBar, QStyleFactory, 
-    QLabel, QHBoxLayout, QTabBar, QMenu
-)
-from PyQt5.QtWebEngineWidgets import QWebEngineView
+    QLabel, QHBoxLayout, QTabBar, QMenu)
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineProfile
+from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PyQt5.QtCore import QUrl, Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QKeySequence
+
+
+# Adding the all mighty adblocker
+from adblockparser import AdblockRules
+from pathlib import Path
 
 
 # Signal to update the bookmark menu from a background thread
@@ -94,6 +99,11 @@ class Browser(QMainWindow):
 
         # Mode toggle button
         self.mode_toggle_btn = QAction("Switch to Dark Mode", self)
+        self.mode_toggle_btn.setStatusTip("Toggle Dark/Light Mode")
+        self.mode_toggle_btn.triggered.connect(self.toggle_dark_mode)
+        self.nav_bar.addAction(self.mode_toggle_btn)
+
+        # Menu Bar
         self.mode_toggle_btn.setStatusTip("Toggle Dark/Light Mode")
         self.mode_toggle_btn.triggered.connect(self.toggle_dark_mode)
         self.nav_bar.addAction(self.mode_toggle_btn)
@@ -292,12 +302,9 @@ class Browser(QMainWindow):
     def _load_bookmarks_from_file(self, file_name):
         try:
             with open(file_name, "r") as file:
-                bookmarks = json.load(file)
-                self.bookmarks = bookmarks
-                # Update the UI on the main thread
-                QMetaObject.invokeMethod(self.update_bookmark_menu_from_signal, "update_menu", Qt.QueuedConnection, Q_ARG(list, self.bookmarks))
-        except Exception as e:
-            QMetaObject.invokeMethod(self, "critical_error", Qt.QueuedConnection, Q_ARG(str, f"Failed to load bookmarks: {e}"))
+                QMetaObject.invokeMethod(self, "critical_error", Qt.QueuedConnection, Q_ARG(str, f"Failed to load bookmarks: {e}"))
+        except:
+            pass
 
     def save_bookmarks(self):
         file_name, _ = QFileDialog.getSaveFileName(self, "Save Bookmark File", "", "JSON Files (*.json)")
@@ -335,8 +342,45 @@ class Browser(QMainWindow):
     def critical_error(self, message):
         QMessageBox.critical(self, "Error", message)
 
+
+# Adblock section
+
+class AdBlockIntercept(QWebEngineUrlRequestInterceptor):
+    def __init__(self, rules, parent=None):
+        super().__init__(parent)
+        self.rules = rules
+
+    def interceptRequest(self, info):
+        url = info.requestUrl().toString()
+        if self.rules.should_block(url):
+            info.block(True)
+        else:
+            info.block(False)
+
+def load_filter_rules(filter_file_path):
+    filter_file_path = filter_file_path.resolve()
+    if not filter_file_path.exists():
+        raise FileNotFoundError("Filter file not found")
+    
+    with open(filter_file_path, "r", encoding="utf-8") as f:
+        filters = [line.strip() for line in f if line.strip() and not line.startswith("!")]
+
+    return AdblockRules(filters)
+
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    # filter list path
+    base_path = Path(__file__).parent
+    filter_path = base_path / "easylist.txt"
+    rules = load_filter_rules(filter_path)
+
+    interceptor = AdBlockIntercept(rules)
+    profile = QWebEngineProfile.defaultProfile()
+    profile.setUrlRequestInterceptor(interceptor)
+
     app.setStyle(QStyleFactory.create('Fusion'))  # Ensure consistent look
     browser = Browser()
     browser.show()
